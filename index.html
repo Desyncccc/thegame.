@@ -88,6 +88,9 @@ import {EffectComposer} from 'three/addons/postprocessing/EffectComposer.js';
 import {RenderPass} from 'three/addons/postprocessing/RenderPass.js';
 import {UnrealBloomPass} from 'three/addons/postprocessing/UnrealBloomPass.js';
 import {OutputPass} from 'three/addons/postprocessing/OutputPass.js';
+import {GLTFLoader} from 'three/addons/loaders/GLTFLoader.js';
+import {RoomEnvironment} from 'three/addons/environments/RoomEnvironment.js';
+import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
 
 const $=id=>document.getElementById(id), V3=THREE.Vector3, rnd=(a,b)=>a+Math.random()*(b-a);
 const R=46, PH=10, EYE=1.7;
@@ -109,17 +112,18 @@ composer.addPass(new UnrealBloomPass(new THREE.Vector2(innerWidth,innerHeight),0
 composer.addPass(new OutputPass());
 addEventListener('resize',()=>{camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix();renderer.setSize(innerWidth,innerHeight);composer.setSize(innerWidth,innerHeight)});
 
+scene.environment=new THREE.PMREMGenerator(renderer).fromScene(new RoomEnvironment(),.04).texture;
 scene.add(new THREE.HemisphereLight(0x8899ff,0x221133,1.1));
 const sun=new THREE.DirectionalLight(0xff88cc,0.8);sun.position.set(20,40,10);scene.add(sun);
 const muzzle=new THREE.PointLight(0x66ddff,0,18);camera.add(muzzle);muzzle.position.set(.3,-.2,-1);
 const boomLight=new THREE.PointLight(0xffaa55,0,40);scene.add(boomLight);
 
 // floor + grid
-const floor=new THREE.Mesh(new THREE.CircleGeometry(R,64),new THREE.MeshStandardMaterial({color:0x0a0d1f,roughness:.35,metalness:.6}));
+const floor=new THREE.Mesh(new THREE.CircleGeometry(R,64),new THREE.MeshStandardMaterial({color:0x0a0d1f,roughness:.35,metalness:.6,envMapIntensity:.15}));
 floor.rotation.x=-Math.PI/2;scene.add(floor);
 const grid=new THREE.GridHelper(R*2,46,0x33e1ff,0x1b2a6b);grid.position.y=.02;grid.material.transparent=true;grid.material.opacity=.55;scene.add(grid);
 // wall
-const wall=new THREE.Mesh(new THREE.CylinderGeometry(R,R,14,64,1,true),new THREE.MeshStandardMaterial({color:0x0b0e24,side:THREE.BackSide,roughness:.6}));
+const wall=new THREE.Mesh(new THREE.CylinderGeometry(R,R,14,64,1,true),new THREE.MeshStandardMaterial({color:0x0b0e24,side:THREE.BackSide,roughness:.6,envMapIntensity:.1}));
 wall.position.y=7;scene.add(wall);
 for(const [y,c] of [[.3,0xff2d6f],[6,0x33e1ff],[14,0xb14cff]]){
   const ring=new THREE.Mesh(new THREE.TorusGeometry(R-.1,.12,6,96),new THREE.MeshBasicMaterial({color:c}));
@@ -129,7 +133,7 @@ for(const [y,c] of [[.3,0xff2d6f],[6,0x33e1ff],[14,0xb14cff]]){
 const pillars=[],pillarMeshes=[];
 function addPillar(x,z,r,c){
   pillars.push({x,z,r});
-  const m=new THREE.Mesh(new THREE.CylinderGeometry(r,r,PH,10),new THREE.MeshStandardMaterial({color:0x10142e,roughness:.4,metalness:.7,flatShading:true}));
+  const m=new THREE.Mesh(new THREE.CylinderGeometry(r,r,PH,10),new THREE.MeshStandardMaterial({color:0x10142e,roughness:.4,metalness:.7,flatShading:true,envMapIntensity:.3}));
   m.position.set(x,PH/2,z);scene.add(m);pillarMeshes.push(m);
   for(const y of [.6,PH*.5,PH-.3]){const t=new THREE.Mesh(new THREE.TorusGeometry(r+.03,.07,6,20),new THREE.MeshBasicMaterial({color:c}));t.rotation.x=Math.PI/2;t.position.set(x,y,z);scene.add(t)}
 }
@@ -220,12 +224,30 @@ function fromClient(c,m){
   else if(m.t==='take')ev(m);
   else if(m.t==='fx'){onEvent(m);conns.forEach(x=>x!==c&&x.open&&x.send(m))}
 }
+// teammate model: animated robot (falls back to a capsule until/unless it loads)
+let robot=null,robotScale=.42;
+new GLTFLoader().load('https://cdn.jsdelivr.net/gh/mrdoob/three.js@r160/examples/models/gltf/RobotExpressive/RobotExpressive.glb',g=>{
+  robot=g;for(const r of remotes.values())attachRobot(r)},undefined,()=>{});
+function attachRobot(r){
+  if(!robot||r.mixer)return;
+  const m=SkeletonUtils.clone(robot.scene);m.scale.setScalar(robotScale);m.rotation.y=Math.PI;
+  m.traverse(o=>{if(o.isMesh){o.material=o.material.clone();o.material.envMapIntensity=.3;o.material.metalness=Math.min(o.material.metalness,.5)}});
+  r.mesh.clear();r.mesh.add(m);
+  const mk=new THREE.Mesh(new THREE.OctahedronGeometry(.12),bmat(0x33e1ff));mk.position.y=2.35;r.mesh.add(mk);
+  r.mixer=new THREE.AnimationMixer(m);r.acts={};
+  for(const n of ['Idle','Running','Death'])r.acts[n]=r.mixer.clipAction(THREE.AnimationClip.findByName(robot.animations,n));
+  r.acts.Death.setLoop(THREE.LoopOnce);r.acts.Death.clampWhenFinished=true;r.cur='Idle';r.acts.Idle.play();
+}
+function animRemote(r,dt){
+  if(!r.mixer){if(r.down){r.mesh.rotation.x=-Math.PI/2;r.mesh.position.y+=.4}return}
+  const want=r.down?'Death':Math.hypot(r.net.x-r.pos.x,r.net.z-r.pos.z)>.12?'Running':'Idle';
+  if(want!==r.cur){r.acts[r.cur].fadeOut(.15);r.acts[want].reset().fadeIn(.15).play();r.cur=want}
+  r.mixer.update(dt);
+}
 function addRemote(id){
   const g=new THREE.Group(),body=new THREE.Mesh(new THREE.CapsuleGeometry(.4,1,4,10),new THREE.MeshStandardMaterial({color:0x123a55,emissive:0x0a6a8a,roughness:.4}));
   body.position.y=.9;g.add(body);
-  const vis=new THREE.Mesh(new THREE.BoxGeometry(.5,.16,.2),bmat(0x33e1ff));vis.position.set(0,1.45,-.32);g.add(vis);
-  const gun=new THREE.Mesh(new THREE.BoxGeometry(.1,.12,.7),bmat(0xffc233));gun.position.set(.38,1.1,-.45);g.add(gun);
-  scene.add(g);const r={pos:new V3(0,0,6),net:new V3(0,0,6),yaw:0,down:false,hp:100,mesh:g};remotes.set(id,r);return r;
+  scene.add(g);const r={pos:new V3(0,0,6),net:new V3(0,0,6),yaw:0,down:false,hp:100,mesh:g};remotes.set(id,r);attachRobot(r);return r;
 }
 function dropRemote(id){const r=remotes.get(id);if(r){scene.remove(r.mesh);remotes.delete(id)}}
 function onSnap(m){
@@ -239,14 +261,80 @@ function onSnap(m){
 }
 
 // ---------- enemies ----------
+const darkMat=new THREE.MeshStandardMaterial({color:0x4a5070,roughness:.4,metalness:.8,flatShading:true,envMapIntensity:.9});
+const GEO={},geo=(k,f)=>GEO[k]||(GEO[k]=f());
+function P(par,g,m,x=0,y=0,z=0,rx=0,ry=0,rz=0){const o=new THREE.Mesh(g,m);o.position.set(x,y,z);o.rotation.set(rx,ry,rz);par.add(o);return o}
+const ICO=[[0,1,1.618],[0,-1,1.618],[0,1,-1.618],[0,-1,-1.618],[1,1.618,0],[-1,1.618,0],[1,-1.618,0],[-1,-1.618,0],[1.618,0,1],[-1.618,0,1],[1.618,0,-1],[-1.618,0,-1]].map(a=>new V3(...a).normalize());
+const UPV=new V3(0,1,0),box=(k,x,y,z)=>geo(k,()=>new THREE.BoxGeometry(x,y,z));
+// builds a multi-part model facing +z; returns per-frame animation fn
+function buildEnemy(ty,T,mat,g){
+  const r=T.r,glow=bmat(T.c),eyeG=geo('eye',()=>new THREE.SphereGeometry(1,14,10));
+  const eye=(y,z,sc,m=glow)=>{const e=P(g,eyeG,m,0,y,z);e.scale.setScalar(sc);e.userData.crit=1;return e};
+  if(ty===0){ // grunt: four-legged walker
+    P(g,geo('g0',()=>new THREE.IcosahedronGeometry(r*.72,1)),mat);
+    P(g,geo('g1',()=>new THREE.SphereGeometry(r*.92,12,6,0,6.283,0,1.4)),darkMat,0,.04,-.08,-.4);
+    P(g,geo('g2',()=>new THREE.TorusGeometry(r*.36,.05,6,14)),darkMat,0,-.06,r*.66);
+    eye(-.06,r*.62,r*.3);
+    for(const sx of [-1,1])P(g,geo('g3',()=>new THREE.ConeGeometry(.07,.42,5)),darkMat,sx*.26,-.34,r*.8,Math.PI/2,0,sx*.25);
+    const legs=[],base=[.8,-.8,2.3,-2.3];
+    for(const a of base){const pv=new THREE.Group();pv.rotation.y=a;pv.position.set(Math.sin(a)*r*.5,-.15,Math.cos(a)*r*.5);g.add(pv);
+      P(pv,box('lu',.12,.12,.75),darkMat,0,.17,.33,-.5);
+      P(pv,geo('ll',()=>new THREE.CylinderGeometry(.065,.02,1.43,5)),darkMat,0,-.35,.8,-.2);
+      P(pv,geo('lj',()=>new THREE.SphereGeometry(.1,6,5)),glow,0,.35,.66);legs.push(pv)}
+    return t=>legs.forEach((pv,i)=>{const ph=t*13+(i===0||i===3?0:Math.PI);pv.rotation.y=base[i]+Math.sin(ph)*.32;pv.rotation.x=-Math.max(0,Math.cos(ph))*.14});
+  }
+  if(ty===1){ // bomber: rolling spiked mine
+    const sp=new THREE.Group();g.add(sp);
+    P(sp,geo('b0',()=>new THREE.IcosahedronGeometry(r*.8,1)),mat);
+    for(const v of ICO){const c=P(sp,geo('b1',()=>new THREE.ConeGeometry(.1,.42,5)),darkMat);c.position.copy(v).multiplyScalar(r*.98);c.quaternion.setFromUnitVectors(UPV,v);
+      P(sp,geo('b2',()=>new THREE.SphereGeometry(.05,5,4)),glow).position.copy(v).multiplyScalar(r*1.38)}
+    P(sp,geo('b3',()=>new THREE.TorusGeometry(r*.83,.05,5,16)),darkMat,0,0,0,0,Math.PI/2);
+    eye(0,r*.82,r*.24,bmat(0xffffff));
+    return (t,dt)=>{sp.rotation.x+=dt*9};
+  }
+  if(ty===2){ // spitter: hovering turret
+    P(g,geo('s0',()=>new THREE.OctahedronGeometry(r*.95,0)),mat).scale.set(1,1.3,1);
+    P(g,geo('s1',()=>new THREE.TorusGeometry(r*.85,.07,6,18)),darkMat,0,0,0,Math.PI/2);
+    P(g,geo('s2',()=>new THREE.CylinderGeometry(.1,.16,.85,8)),darkMat,0,-.2,r*.75,Math.PI/2);
+    P(g,geo('s3',()=>new THREE.TorusGeometry(.12,.035,5,12)),glow,0,-.2,r*.75+.42);
+    eye(.3,r*.52,r*.28);
+    const fins=new THREE.Group();g.add(fins);
+    for(let i=0;i<3;i++){const a=i*2.094;P(fins,box('s4',.06,.55,.32),darkMat,Math.sin(a)*r*1.3,-.1,Math.cos(a)*r*1.3,0,a);P(fins,box('s5',.07,.06,.34),glow,Math.sin(a)*r*1.3,.2,Math.cos(a)*r*1.3,0,a)}
+    P(g,geo('s6',()=>new THREE.ConeGeometry(.2,.4,6)),darkMat,0,-.9,0,Math.PI);
+    P(g,geo('b2',()=>new THREE.SphereGeometry(.05,5,4)),glow,0,-1.1,0).scale.setScalar(1.8);
+    return (t,dt)=>{fins.rotation.y+=dt*3};
+  }
+  if(ty===3){ // tank: heavy mech
+    P(g,box('t0',2.1,1.6,1.5),mat,0,.1,0);
+    P(g,box('t1',1.5,.9,.2),darkMat,0,-.1,.78);
+    P(g,box('t2',.9,.55,.9),darkMat,0,1.1,.15);
+    P(g,box('t3',.7,.16,.12),glow,0,1.12,.62).userData.crit=1;
+    for(const sx of [-1,1]){
+      P(g,box('t4',.85,.8,1.2),darkMat,sx*1.5,.65,0);P(g,box('t5',.87,.08,1.22),glow,sx*1.5,.85,0);
+      P(g,geo('t6',()=>new THREE.CylinderGeometry(.14,.14,.8,6)),darkMat,sx*.6,1.1,-.75);P(g,geo('lj',()=>new THREE.SphereGeometry(.1,6,5)),glow,sx*.6,1.52,-.75);
+    }
+    const arms=[],legs=[];
+    for(const sx of [-1,1]){
+      const a=new THREE.Group();a.position.set(sx*1.5,.3,0);g.add(a);P(a,box('t7',.5,1.3,.55),darkMat,0,-.75,0);P(a,box('t8',.62,.5,.68),mat,0,-1.55,0);arms.push(a);
+      const l=new THREE.Group();l.position.set(sx*.55,-.7,0);g.add(l);P(l,box('t9',.6,1.3,.7),darkMat,0,-.6,0);P(l,box('ta',.7,.2,1),darkMat,0,-1.2,.15);P(l,box('tb',.62,.06,.72),glow,0,-.3,0);legs.push(l);
+    }
+    return t=>{const s=Math.sin(t*5)*.45;legs[0].rotation.x=s;legs[1].rotation.x=-s;arms[0].rotation.x=-s*.8;arms[1].rotation.x=s*.8};
+  }
+  // boss: armored core
+  P(g,geo('x0',()=>new THREE.IcosahedronGeometry(r*.8,1)),mat);
+  eye(0,r*.8,r*.2,bmat(0xffffff));P(g,geo('x1',()=>new THREE.TorusGeometry(r*.36,.1,6,20)),glow,0,0,r*.72);
+  const rings=[1.3,1.45,1.6].map((k,i)=>P(g,geo('x2'+i,()=>new THREE.TorusGeometry(r*k,.09,6,48)),glow,0,0,0,i*1.1,i*.7));
+  const plates=new THREE.Group();g.add(plates);
+  for(let i=0;i<6;i++){const a=i*1.047;P(plates,box('x3',1.3,2,.28),darkMat,Math.sin(a)*r*1.05,0,Math.cos(a)*r*1.05,0,a);P(plates,box('x4',1.32,.1,.3),glow,Math.sin(a)*r*1.05,.6,Math.cos(a)*r*1.05,0,a)}
+  for(let i=0;i<8;i++){const a=i*.785;P(g,geo('x5',()=>new THREE.ConeGeometry(.24,1.3,5)),darkMat,Math.sin(a)*r*.55,r*.85,Math.cos(a)*r*.55,Math.cos(a)*.5,0,-Math.sin(a)*.5)}
+  P(g,geo('x6',()=>new THREE.ConeGeometry(r*.5,r*.9,8)),darkMat,0,-r*.95,0,Math.PI);
+  return (t,dt)=>{plates.rotation.y+=dt*.9;rings.forEach((o,i)=>{o.rotation.x+=dt*(1.2+i*.5);o.rotation.y+=dt*(.8-i*.3)})};
+}
 function addEnemy(id,ty,x,z,hp){
-  const T=ET[ty],g=new THREE.Group(),mat=new THREE.MeshStandardMaterial({color:0x14142a,emissive:T.c,emissiveIntensity:.35,roughness:.3,metalness:.6,flatShading:true});
-  const geo=[new THREE.IcosahedronGeometry(T.r,0),new THREE.SphereGeometry(T.r,10,8),new THREE.OctahedronGeometry(T.r*1.15,0),new THREE.BoxGeometry(T.r*1.6,T.r*1.6,T.r*1.6),new THREE.IcosahedronGeometry(T.r,1)][ty];
-  g.add(new THREE.Mesh(geo,mat));
-  const eye=new THREE.Mesh(new THREE.SphereGeometry(T.r*.36,10,8),bmat(ty===4?0xffffff:T.c));eye.position.z=T.r*(ty===3?.85:.8);eye.userData.crit=1;g.add(eye);
-  if(ty>=3){const t=new THREE.Mesh(new THREE.TorusGeometry(T.r*1.35,.08,6,24),bmat(T.c));t.userData.spin=1;g.add(t)}
+  const T=ET[ty],g=new THREE.Group(),mat=new THREE.MeshStandardMaterial({color:0x14142a,emissive:T.c,emissiveIntensity:.35,roughness:.3,metalness:.6,flatShading:true,envMapIntensity:.5});
+  const anim=buildEnemy(ty,T,mat,g);
   g.userData.eid=id;g.position.set(x,T.r+.5,z);scene.add(g);
-  const e={id,ty,T,pos:new V3(x,0,z),net:new V3(x,0,z),hp,max:hp,mesh:g,mat,flash:0,cd:1,cd2:3,ph:Math.random()*6};
+  const e={id,ty,T,pos:new V3(x,0,z),net:new V3(x,0,z),hp,max:hp,mesh:g,mat,anim,flash:0,cd:1,cd2:3,ph:Math.random()*6};
   enemies.set(id,e);return e;
 }
 function spawnEnemy(ty,x,z){
@@ -351,7 +439,7 @@ function offerUps(){const pool=[...UPS];pendingUps=[];for(let i=0;i<3;i++)pendin
 function pickUp(i){pendingUps[i][2](stats);pendingUps=null;$('ups').style.display='none';tone(660,.12,'sine',.1,1320)}
 const magOf=i=>Math.round(W[i].mag*stats.mag);
 function reload(){if(reloadT>0||ammo[cur]>=magOf(cur))return;reloadT=W[cur].rl*stats.reload;tone(300,.1,'triangle',.05,200)}
-function switchW(i){if(i===cur)return;cur=i;reloadT=0;cd=Math.max(cd,.25);gun.position.y=-.6;gunMat.color.setHex(W[i].c);tone(500,.05,'triangle',.04)}
+function switchW(i){if(i===cur)return;cur=i;reloadT=0;cd=Math.max(cd,.25);gun.position.y=-.6;tone(500,.05,'triangle',.04)}
 const ray=new THREE.Raycaster();
 function fire(){
   const w=W[cur];
@@ -385,11 +473,22 @@ function explodeRocket(r){
 }
 
 // viewmodel
-const gun=new THREE.Group(),gunMat=new THREE.MeshBasicMaterial({color:W[0].c});
-{const b=new THREE.Mesh(new THREE.BoxGeometry(.11,.15,.62),new THREE.MeshStandardMaterial({color:0x1a1f3d,roughness:.3,metalness:.8}));gun.add(b);
- const s=new THREE.Mesh(new THREE.BoxGeometry(.025,.02,.45),gunMat);s.position.y=.075;gun.add(s);
- const g=new THREE.Mesh(new THREE.BoxGeometry(.08,.2,.1),b.material);g.position.set(0,-.15,.2);gun.add(g);
- const t=new THREE.Mesh(new THREE.BoxGeometry(.05,.05,.2),gunMat);t.position.set(0,0,-.38);gun.add(t)}
+const gun=new THREE.Group(),guns=[];
+{const A=new THREE.MeshStandardMaterial({color:0x3a4263,roughness:.35,metalness:.85}),B=new THREE.MeshStandardMaterial({color:0x8a93b8,roughness:.4,metalness:.8});
+ const cz=(r1,r2,l,n=10)=>{const c=new THREE.CylinderGeometry(r1,r2,l,n);c.rotateX(Math.PI/2);return c},bx=(x,y,z)=>new THREE.BoxGeometry(x,y,z);
+ let g=new THREE.Group(),gl=bmat(W[0].c); // rifle
+ P(g,bx(.07,.11,.4),A);P(g,bx(.055,.07,.26),B,0,.005,-.31);P(g,cz(.016,.016,.2),A,0,.01,-.52);P(g,cz(.026,.026,.07),B,0,.01,-.62);
+ P(g,bx(.076,.012,.5),gl,0,-.02,-.12);P(g,bx(.045,.2,.08),B,0,-.14,-.06,.25);P(g,bx(.05,.14,.06),A,0,-.11,.14,-.35);P(g,bx(.06,.09,.22),B,0,-.01,.3);
+ P(g,bx(.02,.035,.1),A,0,.075,-.05);P(g,bx(.03,.03,.012),gl,0,.1,-.05);P(g,bx(.02,.04,.02),A,0,.07,-.42);guns.push(g);
+ g=new THREE.Group();gl=bmat(W[1].c); // shotgun
+ P(g,cz(.03,.03,.6),A,-.032,.02,-.3);P(g,cz(.03,.03,.6),A,.032,.02,-.3);P(g,bx(.12,.1,.3),B,0,0,.08);P(g,bx(.1,.06,.22),B,0,-.045,-.28);
+ for(let i=0;i<3;i++)P(g,bx(.104,.008,.02),gl,0,-.045,-.21-i*.07);
+ P(g,bx(.012,.012,.55),gl,0,.052,-.3);P(g,bx(.055,.15,.07),A,0,-.12,.2,-.4);P(g,bx(.07,.1,.2),A,0,-.02,.32);guns.push(g);
+ g=new THREE.Group();gl=bmat(W[2].c); // launcher
+ P(g,cz(.075,.075,.7,14),A,0,.02,-.15);P(g,cz(.085,.1,.1,14),B,0,.02,-.52);P(g,cz(.1,.08,.1,14),B,0,.02,.22);
+ for(let i=0;i<3;i++)P(g,new THREE.TorusGeometry(.079,.008,5,20),gl,0,.02,-.38+i*.14);
+ P(g,new THREE.ConeGeometry(.05,.14,10),gl,0,.02,-.56,-Math.PI/2);P(g,bx(.05,.14,.06),A,0,-.11,.02,-.3);P(g,bx(.04,.08,.12),B,.1,.08,-.1);P(g,bx(.045,.045,.01),gl,.1,.08,-.165);guns.push(g);
+ guns.forEach(x=>gun.add(x))}
 gun.position.set(.3,-.26,-.55);camera.add(gun);
 
 function playerUpdate(dt){
@@ -424,7 +523,7 @@ function playerUpdate(dt){
   camera.rotation.set(me.pitch,me.yaw,me.down?.5:0);
   kick=Math.max(0,kick-dt*1.2);
   gun.position.z=-.55+kick;gun.position.y+=((reloadT>0?-.42:-.24)+Math.sin(bob*2)*.006-gun.position.y)*Math.min(1,dt*14);
-  gun.rotation.x=kick*1.2+(reloadT>0?-.6:0);gun.visible=!me.down;
+  gun.rotation.x=kick*1.2+(reloadT>0?-.6:0);gun.visible=!me.down;guns.forEach((x,i)=>x.visible=i===cur);
   muzzle.intensity=Math.max(0,muzzle.intensity-dt*300);
 }
 let bob=0,mouseDown=false;
@@ -469,18 +568,18 @@ function frame(now){
     let boss=null;
     for(const e of enemies.values()){
       if(!isHost)e.pos.lerp(e.net,Math.min(1,dt*10));
-      const g=e.mesh;g.position.set(e.pos.x,e.T.r+.5+Math.sin(time*3+e.ph)*.15,e.pos.z);
+      const g=e.mesh;g.position.set(e.pos.x,e.T.r+.5+(e.ty===0||e.ty===3?Math.abs(Math.sin(time*(e.ty?5:13)+e.ph))*.06:Math.sin(time*3+e.ph)*.15),e.pos.z);
       let tx=me.pos.x,tz=me.pos.z,bd=me.down?1e9:e.pos.distanceToSquared(me.pos);
       for(const r of remotes.values()){const d=e.pos.distanceToSquared(r.pos);if(!r.down&&d<bd){bd=d;tx=r.pos.x;tz=r.pos.z}}
       g.rotation.y=Math.atan2(tx-e.pos.x,tz-e.pos.z);
       if(e.ty===1)g.scale.setScalar(1+Math.sin(time*18)*.12);
-      for(const c of g.children)if(c.userData.spin){c.rotation.x+=dt*2;c.rotation.y+=dt*1.3}
+      e.anim(time+e.ph,dt);
       e.flash-=dt;e.mat.emissiveIntensity=e.flash>0?3:.35;if(e.flash>0)e.mat.emissive.setHex(0xffffff);else e.mat.emissive.setHex(e.T.c);
       if(e.ty===4)boss=e;
     }
     $('boss').style.display=boss?'block':'none';if(boss)$('bossfill').style.width=Math.max(0,boss.hp/boss.max*100)+'%';
     // remote players
-    for(const r of remotes.values()){r.pos.lerp(r.net,Math.min(1,dt*12));r.mesh.position.copy(r.pos);r.mesh.rotation.set(0,r.yaw,0);if(r.down){r.mesh.rotation.x=-Math.PI/2;r.mesh.position.y+=.4}}
+    for(const r of remotes.values()){r.pos.lerp(r.net,Math.min(1,dt*12));r.mesh.position.copy(r.pos);r.mesh.rotation.set(0,r.yaw,0);animRemote(r,dt)}
     // enemy projectiles
     for(let i=eprojs.length-1;i>=0;i--){const p=eprojs[i],q=p.m.position;q.addScaledVector(p.v,dt);p.l-=dt;let dead=p.l<=0||q.y<0||Math.hypot(q.x,q.z)>R;
       for(const c of pillars)if(Math.hypot(q.x-c.x,q.z-c.z)<c.r)dead=true;
@@ -521,7 +620,7 @@ function frame(now){
   composer.render();
 }
 requestAnimationFrame(frame);
-window.__dbg={me,G,enemies,remotes};
+window.__dbg={me,G,enemies,remotes,addEnemy,addRemote,camera};
 </script>
 </body>
 </html>
