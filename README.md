@@ -39,6 +39,7 @@ Supports up to 4 players. **SOLO** works too.
 | `R` | Reload |
 | `E` (hold) | Revive a downed teammate |
 | `ENTER` | Host: start / restart |
+| `ESC` | Pause menu: mouse sensitivity, volume, quit |
 
 ## 🔫 Arsenal
 
@@ -65,6 +66,14 @@ Supports up to 4 players. **SOLO** works too.
 Clear a wave, pick 1 of 3. They stack.
 
 `OVERCHARGE` more damage · `HAIR TRIGGER` faster fire · `PLATING` more HP · `THRUSTERS` more speed · `VAMPIRE` heal on kill · `DRUM MAG` bigger mags · `VOLATILE` your kills explode · `DEADEYE` stronger eye-shots · `BLINK` faster dash · `SLEIGHT` faster reload
+
+## 🖥️ Interface
+
+- **Radar** shows enemies, teammates and health pickups around you.
+- **Damage arcs** point at whatever just hit you.
+- **Teammate markers** track your squad, even off-screen, and flag anyone who needs a revive.
+- **Damage numbers**, hit markers and a dynamic crosshair tell you what your shots are doing.
+- Your best run is saved in the browser.
 
 ## 🤝 Co-op rules
 
